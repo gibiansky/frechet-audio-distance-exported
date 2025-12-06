@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frechet-audio-distance-exported"
+version = "0.1.0"
+description = "Lightweight FAD (Frechet Audio Distance) using exported PyTorch models"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+keywords = ["audio", "frechet", "distance", "fad", "machine-learning", "pytorch"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio :: Analysis",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "torch>=2.0",
+    "numpy",
+    "scipy",
+    "resampy",
+    "soundfile",
+    "tqdm",
+]
+
+[project.optional-dependencies]
+dev = [
+    "frechet-audio-distance",
+    "pytest",
+]
+
+[project.urls]
+Homepage = "https://github.com/gudgud96/frechet-audio-distance"
+Repository = "https://github.com/gudgud96/frechet-audio-distance"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["frechet_audio_distance_exported*"]
