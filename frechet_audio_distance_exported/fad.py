@@ -19,11 +19,59 @@ from scipy import linalg
 from tqdm import tqdm
 
 from .models.vggish import waveform_to_examples, SAMPLE_RATE as VGGISH_SAMPLE_RATE
+from .models.pann import waveform_to_logmel, PANN_CONFIGS, EMBEDDING_SIZE as PANN_EMBEDDING_SIZE
+
+
+def _pad_to_valid_pann_time(x: torch.Tensor) -> torch.Tensor:
+    """Pad input to a valid time dimension for exported PANN model.
+
+    The exported PANN model requires time = 32*k - 24 for some integer k >= 1.
+    Valid values: 8, 40, 72, 104, 136, 168, 200, 232, 264, ...
+
+    Args:
+        x: Input tensor of shape [batch, 1, time, 64]
+
+    Returns:
+        Padded tensor with valid time dimension
+    """
+    time = x.shape[2]
+    # Find the smallest valid time >= current time
+    # time = 32*k - 24, so k = (time + 24) / 32
+    k = (time + 24 + 31) // 32  # Round up
+    valid_time = 32 * k - 24
+    if valid_time < time:
+        valid_time += 32  # Safety check
+
+    if valid_time > time:
+        # Pad with zeros on the time dimension
+        pad_amount = valid_time - time
+        x = torch.nn.functional.pad(x, (0, 0, 0, pad_amount))
+
+    return x
 
 
 # URLs for downloading exported models
 EXPORTED_MODEL_URLS = {
     "vggish": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.1/vggish_exported.pt2",
+    # PANN CNN14 models for different sample rates
+    "pann-8k": None,  # TODO: Add release URLs after upload
+    "pann-16k": None,
+    "pann-32k": None,
+}
+
+# Valid model names and their configurations
+VALID_MODELS = {
+    "vggish": {"sample_rate": 16000, "embedding_dim": 128},
+    "pann-8k": {"sample_rate": 8000, "embedding_dim": 2048},
+    "pann-16k": {"sample_rate": 16000, "embedding_dim": 2048},
+    "pann-32k": {"sample_rate": 32000, "embedding_dim": 2048},
+}
+
+# Map PANN model names to their sample rates
+PANN_SAMPLE_RATES = {
+    "pann-8k": 8000,
+    "pann-16k": 16000,
+    "pann-32k": 32000,
 }
 
 
@@ -76,7 +124,7 @@ class FrechetAudioDistance:
         self,
         ckpt_dir: Optional[str] = None,
         model_name: str = "vggish",
-        sample_rate: int = 16000,
+        sample_rate: Optional[int] = None,
         channels: int = 1,
         verbose: bool = False,
         audio_load_worker: int = 8,
@@ -88,14 +136,32 @@ class FrechetAudioDistance:
             ckpt_dir: Folder where exported models are stored/cached. If None,
                 uses torch.hub cache directory. Models are automatically downloaded
                 on first use if not present.
-            model_name: Model to use (currently only "vggish" supported)
-            sample_rate: Sample rate for audio (must be 16000 for vggish)
+            model_name: Model to use. Options:
+                - "vggish": VGGish model (128-dim embeddings, 16kHz)
+                - "pann-8k": PANN CNN14 at 8kHz (2048-dim embeddings)
+                - "pann-16k": PANN CNN14 at 16kHz (2048-dim embeddings)
+                - "pann-32k": PANN CNN14 at 32kHz (2048-dim embeddings)
+            sample_rate: Sample rate for audio. If None, uses model's default.
+                Must match model's expected sample rate.
             channels: Number of channels (1 for mono)
             verbose: Whether to print progress information
             audio_load_worker: Number of threads for audio loading
         """
-        assert model_name == "vggish", "Only 'vggish' model is currently supported"
-        assert sample_rate == 16000, "Sample rate must be 16000 for VGGish"
+        if model_name not in VALID_MODELS:
+            raise ValueError(
+                f"Unknown model: {model_name}. Valid options: {list(VALID_MODELS.keys())}"
+            )
+
+        model_config = VALID_MODELS[model_name]
+        expected_sr = model_config["sample_rate"]
+
+        # Set sample rate to model default if not specified
+        if sample_rate is None:
+            sample_rate = expected_sr
+        elif sample_rate != expected_sr:
+            raise ValueError(
+                f"Model '{model_name}' requires sample_rate={expected_sr}, got {sample_rate}"
+            )
 
         self.model_name = model_name
         self.sample_rate = sample_rate
@@ -127,7 +193,17 @@ class FrechetAudioDistance:
 
     def _load_model(self):
         """Load the exported model, downloading if necessary."""
-        model_path = os.path.join(self.ckpt_dir, f"{self.model_name}_exported.pt2")
+        # Map model name to exported file name
+        if self.model_name == "vggish":
+            model_filename = "vggish_exported.pt2"
+        elif self.model_name in PANN_SAMPLE_RATES:
+            # e.g., "pann-16k" -> "pann_cnn14_16k_exported.pt2"
+            sr_suffix = self.model_name.split("-")[1]  # "16k"
+            model_filename = f"pann_cnn14_{sr_suffix}_exported.pt2"
+        else:
+            model_filename = f"{self.model_name}_exported.pt2"
+
+        model_path = os.path.join(self.ckpt_dir, model_filename)
 
         # Check if model exists locally
         if not os.path.exists(model_path):
@@ -163,19 +239,36 @@ class FrechetAudioDistance:
             Concatenated embeddings as numpy array
         """
         embd_lst = []
+        is_pann = self.model_name.startswith("pann-")
 
         for audio in tqdm(x, disable=(not self.verbose)):
             try:
-                # Preprocess audio to mel-spectrogram patches
-                patches = waveform_to_examples(audio, sr, return_tensor=True)
-                patches = patches.to(self.device)
+                if is_pann:
+                    # PANN preprocessing: waveform -> log-mel spectrogram
+                    target_sr = PANN_SAMPLE_RATES[self.model_name]
+                    preprocessed = waveform_to_logmel(audio, sr, target_sample_rate=target_sr, return_tensor=True)
+                    # Pad to valid time dimension for exported model
+                    preprocessed = _pad_to_valid_pann_time(preprocessed)
+                    preprocessed = preprocessed.to(self.device)
 
-                # Run model
-                with torch.no_grad():
-                    embd = self.model(patches)
+                    # Run model
+                    with torch.no_grad():
+                        embd = self.model(preprocessed)
 
-                # Convert to numpy
-                embd = embd.cpu().numpy()
+                    # PANN returns one embedding per audio file
+                    embd = embd.cpu().numpy()
+                else:
+                    # VGGish preprocessing: waveform -> mel-spectrogram patches
+                    patches = waveform_to_examples(audio, sr, return_tensor=True)
+                    patches = patches.to(self.device)
+
+                    # Run model
+                    with torch.no_grad():
+                        embd = self.model(patches)
+
+                    # Convert to numpy
+                    embd = embd.cpu().numpy()
+
                 embd_lst.append(embd)
 
             except Exception as e:
@@ -197,11 +290,23 @@ class FrechetAudioDistance:
         Returns:
             Embeddings as numpy array
         """
-        patches = waveform_to_examples(audio, self.sample_rate, return_tensor=True)
-        patches = patches.to(self.device)
+        is_pann = self.model_name.startswith("pann-")
 
-        with torch.no_grad():
-            embd = self.model(patches)
+        if is_pann:
+            target_sr = PANN_SAMPLE_RATES[self.model_name]
+            preprocessed = waveform_to_logmel(audio, self.sample_rate, target_sample_rate=target_sr, return_tensor=True)
+            # Pad to valid time dimension for exported model
+            preprocessed = _pad_to_valid_pann_time(preprocessed)
+            preprocessed = preprocessed.to(self.device)
+
+            with torch.no_grad():
+                embd = self.model(preprocessed)
+        else:
+            patches = waveform_to_examples(audio, self.sample_rate, return_tensor=True)
+            patches = patches.to(self.device)
+
+            with torch.no_grad():
+                embd = self.model(patches)
 
         return embd.cpu().numpy()
 

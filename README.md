@@ -44,6 +44,8 @@ pip install -e ".[dev]"
 
 ## Usage
 
+### VGGish (Default)
+
 ```python
 from frechet_audio_distance_exported import FrechetAudioDistance
 
@@ -60,6 +62,29 @@ The exported model (~275 MB) is automatically downloaded to the torch hub cache 
 ```python
 fad = FrechetAudioDistance(model_name="vggish", ckpt_dir="/path/to/cache")
 ```
+
+### PANN (CNN14)
+
+PANN (Pretrained Audio Neural Networks) models are also supported with three sample rate variants:
+
+```python
+from frechet_audio_distance_exported import FrechetAudioDistance
+
+# PANN at 16kHz (most common)
+fad = FrechetAudioDistance(model_name="pann-16k")
+score = fad.score("path/to/background/", "path/to/eval/")
+
+# PANN at 8kHz (for low-quality or telephony audio)
+fad_8k = FrechetAudioDistance(model_name="pann-8k")
+
+# PANN at 32kHz (for high-fidelity audio)
+fad_32k = FrechetAudioDistance(model_name="pann-32k")
+```
+
+**Choosing the right sample rate:**
+- **8kHz**: Telephony, low-bitrate audio, or bandwidth-limited applications
+- **16kHz**: General purpose, speech, most generated audio
+- **32kHz**: High-fidelity audio, music with rich high frequencies
 
 ### API Compatibility
 
@@ -79,12 +104,26 @@ score = fad.score(bg_dir, eval_dir)
 
 ## Supported Models
 
-| Model | Status | Original Dependency |
-|-------|--------|---------------------|
-| VGGish | Supported | torch.hub (harritaylor/torchvggish) |
-| PANN | Planned | torchlibrosa |
-| CLAP | Planned | laion_clap, transformers |
-| EnCodec | Planned | encodec |
+| Model | Status | Sample Rates | Embedding Dim | Original Dependency |
+|-------|--------|--------------|---------------|---------------------|
+| VGGish | Supported | 16kHz | 128 | torch.hub (harritaylor/torchvggish) |
+| PANN CNN14 | Supported | 8kHz, 16kHz, 32kHz | 2048 | torchlibrosa |
+| CLAP | Planned | - | - | laion_clap, transformers |
+| EnCodec | Planned | - | - | encodec |
+
+### PANN Model Details
+
+PANN (Pretrained Audio Neural Networks) is a family of convolutional neural networks trained on AudioSet. The CNN14 architecture provides high-quality audio embeddings:
+
+| Variant | Model Name | Sample Rate | FFT Window | Hop Size | Mel Range |
+|---------|------------|-------------|------------|----------|-----------|
+| 8kHz | `pann-8k` | 8000 Hz | 256 | 80 | 50-4000 Hz |
+| 16kHz | `pann-16k` | 16000 Hz | 512 | 160 | 50-8000 Hz |
+| 32kHz | `pann-32k` | 32000 Hz | 1024 | 320 | 50-14000 Hz |
+
+**When to use PANN vs VGGish:**
+- **PANN**: Higher-dimensional embeddings (2048 vs 128), better for capturing fine-grained audio differences
+- **VGGish**: More widely used, smaller embeddings, faster computation
 
 ## Dependency Comparison
 
@@ -96,6 +135,7 @@ score = fad.score(bg_dir, eval_dir)
 | resampy | Required | Required |
 | soundfile | Required | Required |
 | tqdm | Required | Required |
+| librosa | Required (for PANN) | Required (for PANN) |
 | transformers | Required (~500MB) | Not needed |
 | laion_clap | Required | Not needed |
 | encodec | Required | Not needed |
@@ -124,12 +164,38 @@ This will:
 3. Export using `torch.export.export()` with dynamic batch size
 4. Save as a `.pt2` file (~275 MB)
 
-### Verify Equivalence
-
-To verify that the exported model produces identical results:
+### Export PANN
 
 ```bash
+# Export all PANN variants (8k, 16k, 32k)
+python scripts/export_pann.py --all
+
+# Or export a specific sample rate
+python scripts/export_pann.py --sample-rate 16000
+python scripts/export_pann.py --sample-rate 8000
+python scripts/export_pann.py --sample-rate 32000
+```
+
+This will:
+1. Download the PANN CNN14 checkpoint from Zenodo (~342 MB each)
+2. Transfer weights to a clean PANNCore module
+3. Validate weight transfer (embedding diff < 1e-4)
+4. Export using `torch.export.export()` with dynamic batch/time
+5. Save as `.pt2` files (e.g., `pann_cnn14_16k_exported.pt2`)
+
+### Verify Equivalence
+
+To verify that the exported models produce identical results:
+
+```bash
+# Verify VGGish
 python scripts/verify_export.py --ckpt-dir /path/to/exported/models
+
+# Verify PANN (all variants)
+python scripts/verify_pann.py --all --ckpt-dir /path/to/exported/models
+
+# Verify specific PANN variant
+python scripts/verify_pann.py --sample-rate 16000
 ```
 
 This runs several tests:
@@ -148,6 +214,17 @@ This runs several tests:
 - **Architecture**: VGG-style CNN + FC layers
 - **Output**: 128-dimensional embeddings per 0.96s audio chunk
 - **Export format**: `torch.export` (.pt2)
+
+### PANN CNN14 Model
+
+- **Input**: 8kHz, 16kHz, or 32kHz mono audio (depending on variant)
+- **Preprocessing**: Log-mel spectrogram (64 mel bands)
+  - Uses librosa for STFT and mel filterbank
+  - Parameters vary by sample rate (see table above)
+- **Architecture**: 6 convolutional blocks (1→64→128→256→512→1024→2048), global mean+max pooling, FC layer
+- **Output**: 2048-dimensional embedding per audio file
+- **Export format**: `torch.export` (.pt2)
+- **Reference**: Kong et al., "PANNs: Large-Scale Pretrained Audio Neural Networks for Audio Pattern Recognition" (2020)
 
 ### FAD Computation
 
@@ -172,17 +249,21 @@ frechet-audio-distance-exported/
 │
 ├── frechet_audio_distance_exported/  # Main package
 │   ├── __init__.py                   # Exports FrechetAudioDistance
-│   ├── fad.py                        # Main FAD class
+│   ├── fad.py                        # Main FAD class (multi-model support)
 │   └── models/
 │       ├── __init__.py
-│       └── vggish.py                 # VGGishCore + preprocessing
+│       ├── vggish.py                 # VGGishCore + preprocessing
+│       └── pann.py                   # PANNCore + preprocessing (librosa-based)
 │
 ├── scripts/                          # Dev scripts (require frechet_audio_distance)
 │   ├── export_vggish.py              # Creates vggish_exported.pt2
-│   └── verify_export.py              # Verifies equivalence with original
+│   ├── export_pann.py                # Creates pann_cnn14_*_exported.pt2
+│   ├── verify_export.py              # Verifies VGGish equivalence
+│   └── verify_pann.py                # Verifies PANN equivalence
 │
 └── tests/                            # Tests (do NOT require frechet_audio_distance)
-    └── test_basic.py                 # Basic functionality tests
+    ├── test_basic.py                 # VGGish functionality tests
+    └── test_pann.py                  # PANN functionality tests
 ```
 
 ## License
@@ -194,3 +275,4 @@ MIT License (same as original frechet-audio-distance)
 - Original [frechet-audio-distance](https://github.com/gudgud96/frechet-audio-distance) by gudgud96
 - VGGish model from [torchvggish](https://github.com/harritaylor/torchvggish) by harritaylor
 - Based on [VGGish](https://github.com/tensorflow/models/tree/master/research/audioset/vggish) from Google/AudioSet
+- PANN models from [PANNs](https://github.com/qiuqiangkong/audioset_tagging_cnn) by Kong et al.
