@@ -28,15 +28,17 @@ The result is a package that can compute FAD scores without needing torch.hub, t
 
 ## Installation
 
+Install directly from GitHub:
+
 ```bash
-pip install frechet-audio-distance-exported
+pip install git+https://github.com/gibiansky/frechet-audio-distance-exported.git
 ```
 
 Or for development:
 
 ```bash
-git clone https://github.com/gudgud96/frechet-audio-distance
-cd frechet-audio-distance/frechet-audio-distance-exported
+git clone https://github.com/gibiansky/frechet-audio-distance-exported.git
+cd frechet-audio-distance-exported
 pip install -e ".[dev]"
 ```
 

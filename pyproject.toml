@@ -40,8 +40,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/gudgud96/frechet-audio-distance"
-Repository = "https://github.com/gudgud96/frechet-audio-distance"
+Homepage = "https://github.com/gibiansky/frechet-audio-distance-exported"
+Repository = "https://github.com/gibiansky/frechet-audio-distance-exported"
 
 [tool.setuptools.packages.find]
 where = ["."]
