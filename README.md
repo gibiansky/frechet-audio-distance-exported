@@ -47,15 +47,18 @@ pip install -e ".[dev]"
 ```python
 from frechet_audio_distance_exported import FrechetAudioDistance
 
-# Initialize with path to exported model
-fad = FrechetAudioDistance(
-    model_name="vggish",
-    ckpt_dir="/path/to/exported/models"  # Directory containing vggish_exported.pt2
-)
+# Initialize - model is automatically downloaded on first use
+fad = FrechetAudioDistance(model_name="vggish")
 
 # Compute FAD between two directories of audio files
 score = fad.score("path/to/background/", "path/to/eval/")
 print(f"FAD Score: {score}")
+```
+
+The exported model (~275 MB) is automatically downloaded to the torch hub cache directory on first use. You can specify a custom cache directory with `ckpt_dir`:
+
+```python
+fad = FrechetAudioDistance(model_name="vggish", ckpt_dir="/path/to/cache")
 ```
 
 ### API Compatibility

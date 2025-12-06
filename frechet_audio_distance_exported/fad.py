@@ -23,7 +23,7 @@ from .models.vggish import waveform_to_examples, SAMPLE_RATE as VGGISH_SAMPLE_RA
 
 # URLs for downloading exported models
 EXPORTED_MODEL_URLS = {
-    "vggish": None,  # Will be set when hosted
+    "vggish": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.1/vggish_exported.pt2",
 }
 
 
@@ -85,7 +85,9 @@ class FrechetAudioDistance:
         Initialize FAD calculator.
 
         Args:
-            ckpt_dir: Folder where exported models are stored
+            ckpt_dir: Folder where exported models are stored/cached. If None,
+                uses torch.hub cache directory. Models are automatically downloaded
+                on first use if not present.
             model_name: Model to use (currently only "vggish" supported)
             sample_rate: Sample rate for audio (must be 16000 for vggish)
             channels: Number of channels (1 for mono)
@@ -124,7 +126,7 @@ class FrechetAudioDistance:
         self._load_model()
 
     def _load_model(self):
-        """Load the exported model."""
+        """Load the exported model, downloading if necessary."""
         model_path = os.path.join(self.ckpt_dir, f"{self.model_name}_exported.pt2")
 
         # Check if model exists locally
@@ -132,12 +134,12 @@ class FrechetAudioDistance:
             # Try to download from URL
             url = EXPORTED_MODEL_URLS.get(self.model_name)
             if url:
-                if self.verbose:
-                    print(f"[Exported FAD] Downloading {self.model_name} model...")
-                torch.hub.download_url_to_file(url, model_path)
+                print(f"[Exported FAD] Downloading {self.model_name} model to {self.ckpt_dir}...")
+                torch.hub.download_url_to_file(url, model_path, progress=True)
+                print(f"[Exported FAD] Download complete.")
             else:
                 raise FileNotFoundError(
-                    f"Exported model not found at {model_path}. "
+                    f"Exported model not found at {model_path} and no download URL available. "
                     f"Please run scripts/export_vggish.py first or provide a valid ckpt_dir."
                 )
 
