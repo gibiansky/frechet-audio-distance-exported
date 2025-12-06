@@ -54,9 +54,9 @@ def _pad_to_valid_pann_time(x: torch.Tensor) -> torch.Tensor:
 EXPORTED_MODEL_URLS = {
     "vggish": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.1/vggish_exported.pt2",
     # PANN CNN14 models for different sample rates
-    "pann-8k": None,  # TODO: Add release URLs after upload
-    "pann-16k": None,
-    "pann-32k": None,
+    "pann-8k": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.2/pann_cnn14_8k_exported.pt2",
+    "pann-16k": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.2/pann_cnn14_16k_exported.pt2",
+    "pann-32k": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.2/pann_cnn14_32k_exported.pt2",
 }
 
 # Valid model names and their configurations
