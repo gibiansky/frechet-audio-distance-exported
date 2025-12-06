@@ -1,5 +1,7 @@
 # frechet-audio-distance-exported
 
+> **Warning:** This package is 100% AI-written with only minimal human supervision; use at your own risk.
+
 A lightweight implementation of Frechet Audio Distance (FAD) using exported PyTorch models.
 
 ## Why This Package?
