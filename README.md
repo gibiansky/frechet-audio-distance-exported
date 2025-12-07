@@ -86,6 +86,50 @@ fad_32k = FrechetAudioDistance(model_name="pann-32k")
 - **16kHz**: General purpose, speech, most generated audio
 - **32kHz**: High-fidelity audio, music with rich high frequencies
 
+### Encodec
+
+Meta's Encodec neural audio codec is supported with two sample rate variants:
+
+```python
+from frechet_audio_distance_exported import FrechetAudioDistance
+
+# Encodec at 24kHz (mono, recommended)
+fad = FrechetAudioDistance(model_name="encodec-24k")
+score = fad.score("path/to/background/", "path/to/eval/")
+
+# Encodec at 48kHz (stereo, for high-fidelity audio)
+fad_48k = FrechetAudioDistance(model_name="encodec-48k")
+```
+
+**Choosing between Encodec variants:**
+- **24kHz**: Mono audio, recommended for most use cases, exact embedding equivalence with original
+- **48kHz**: Stereo audio, higher fidelity, embeddings may differ from original due to LSTM state handling
+
+**Note on 48kHz model:** Due to LSTM state dependencies in the traced model, embeddings for variable-length audio may differ from the original Encodec encoder. However, FAD scores remain valid because the traced model is internally consistent. The 24kHz model provides exact equivalence for all audio lengths.
+
+### CLAP
+
+CLAP (Contrastive Language-Audio Pretraining) provides audio embeddings trained with contrastive learning:
+
+```python
+from frechet_audio_distance_exported import FrechetAudioDistance
+
+# CLAP with CNN14 audio encoder (630k-audioset variant)
+fad = FrechetAudioDistance(model_name="clap")
+score = fad.score("path/to/background/", "path/to/eval/")
+```
+
+**CLAP model details:**
+- Uses CNN14 audio encoder (same architecture as PANN)
+- 48kHz sample rate with 512-dimensional L2-normalized embeddings
+- Based on the LAION-AI 630k-audioset checkpoint
+- Embeddings are contrastively trained for audio-text matching
+
+**When to use CLAP:**
+- **CLAP**: Embeddings capture semantic audio concepts aligned with text descriptions
+- **PANN**: General audio classification embeddings
+- **VGGish**: Established baseline, smaller embeddings
+
 ### API Compatibility
 
 This package provides the same interface as the original `frechet_audio_distance.FrechetAudioDistance`:
@@ -108,8 +152,8 @@ score = fad.score(bg_dir, eval_dir)
 |-------|--------|--------------|---------------|---------------------|
 | VGGish | Supported | 16kHz | 128 | torch.hub (harritaylor/torchvggish) |
 | PANN CNN14 | Supported | 8kHz, 16kHz, 32kHz | 2048 | torchlibrosa |
-| CLAP | Planned | - | - | laion_clap, transformers |
-| EnCodec | Planned | - | - | encodec |
+| Encodec | Supported | 24kHz, 48kHz | 128 | encodec |
+| CLAP | Supported | 48kHz | 512 | laion_clap |
 
 ### PANN Model Details
 
@@ -124,6 +168,37 @@ PANN (Pretrained Audio Neural Networks) is a family of convolutional neural netw
 **When to use PANN vs VGGish:**
 - **PANN**: Higher-dimensional embeddings (2048 vs 128), better for capturing fine-grained audio differences
 - **VGGish**: More widely used, smaller embeddings, faster computation
+
+### Encodec Model Details
+
+Encodec is a neural audio codec from Meta that provides high-quality audio embeddings from its encoder. Unlike VGGish and PANN which use mel-spectrograms, Encodec works directly on raw waveforms:
+
+| Variant | Model Name | Sample Rate | Channels | Hop Length | Notes |
+|---------|------------|-------------|----------|------------|-------|
+| 24kHz | `encodec-24k` | 24000 Hz | 1 (mono) | 320 | Exact equivalence, recommended |
+| 48kHz | `encodec-48k` | 48000 Hz | 2 (stereo) | 320 | Variable-length audio may differ |
+
+**Encodec vs PANN/VGGish:**
+- **Encodec**: Works on raw waveforms (no mel-spectrogram), 128-dim embeddings, captures neural codec representations
+- **PANN/VGGish**: Uses mel-spectrograms, established audio feature extractors
+
+**Important**: Encodec audio inputs must be 10 seconds or shorter. Longer audio should be split into segments.
+
+### CLAP Model Details
+
+CLAP (Contrastive Language-Audio Pretraining) uses contrastive learning to train audio embeddings aligned with text descriptions. The CNN14 audio encoder variant is supported:
+
+| Model Name | Sample Rate | Audio Encoder | Embedding Dim | Notes |
+|------------|-------------|---------------|---------------|-------|
+| `clap` | 48000 Hz | CNN14 | 512 | L2-normalized, 630k-audioset variant |
+
+**CLAP architecture:**
+- Audio encoder: CNN14 (identical to PANN CNN14 architecture)
+- Projection: Linear(2048, 512) + ReLU + Linear(512, 512)
+- Output: L2-normalized 512-dim embeddings
+- Mel-spectrogram: 64 bins, window=1024, hop=480, fmin=50, fmax=14000
+
+**Reference**: Elizalde et al., "CLAP: Learning Audio Concepts from Natural Language Supervision" (2022)
 
 ## Dependency Comparison
 
@@ -183,6 +258,48 @@ This will:
 4. Export using `torch.export.export()` with dynamic batch/time
 5. Save as `.pt2` files (e.g., `pann_cnn14_16k_exported.pt2`)
 
+### Export Encodec
+
+**Prerequisite:** Install the `encodec` package:
+```bash
+pip install encodec
+```
+
+```bash
+# Export all Encodec variants (24k, 48k)
+python scripts/export_encodec.py --all
+
+# Or export a specific sample rate
+python scripts/export_encodec.py --sample-rate 24000
+python scripts/export_encodec.py --sample-rate 48000
+```
+
+This will:
+1. Load the Encodec model from Meta's encodec package
+2. Extract the encoder portion
+3. Export using `torch.jit.trace()` (fixed 10-second input length)
+4. Validate against original encoder
+5. Save as `.pt` files (e.g., `encodec_24k_exported.pt`, ~28 MB each)
+
+### Export CLAP
+
+**Prerequisite:** Install the `laion_clap` package:
+```bash
+pip install laion_clap
+```
+
+```bash
+python scripts/export_clap.py
+```
+
+This will:
+1. Download the CLAP 630k-audioset checkpoint (CNN14 audio encoder)
+2. Create CLAPCore instance (PANNCore + projection layer)
+3. Transfer weights from original CLAP model
+4. Validate against original laion_clap output (cosine similarity > 0.99)
+5. Export using `torch.export.export()` with dynamic batch/time
+6. Save as `clap_exported.pt2` (~350 MB)
+
 ### Verify Equivalence
 
 To verify that the exported models produce identical results:
@@ -196,10 +313,19 @@ python scripts/verify_pann.py --all --ckpt-dir /path/to/exported/models
 
 # Verify specific PANN variant
 python scripts/verify_pann.py --sample-rate 16000
+
+# Verify Encodec (all variants)
+python scripts/verify_encodec.py --all --ckpt-dir /path/to/exported/models
+
+# Verify CLAP
+python scripts/verify_clap.py --ckpt-dir /path/to/exported/models
+
+# Verify specific Encodec variant
+python scripts/verify_encodec.py --sample-rate 24000
 ```
 
 This runs several tests:
-- **Preprocessing**: Verifies mel-spectrogram computation matches original
+- **Preprocessing**: Verifies mel-spectrogram computation matches original (VGGish/PANN)
 - **Embeddings**: Compares embedding vectors from both implementations
 - **FAD Score**: Computes FAD with both and verifies they match
 
@@ -225,6 +351,29 @@ This runs several tests:
 - **Output**: 2048-dimensional embedding per audio file
 - **Export format**: `torch.export` (.pt2)
 - **Reference**: Kong et al., "PANNs: Large-Scale Pretrained Audio Neural Networks for Audio Pattern Recognition" (2020)
+
+### Encodec Model
+
+- **Input**: 24kHz mono or 48kHz stereo audio (max 10 seconds)
+- **Preprocessing**: Direct waveform input (no mel-spectrogram)
+  - Channel conversion: mono→stereo duplication, stereo→mono averaging
+  - Padding to 10 seconds for traced model
+- **Architecture**: SEANetEncoder with Conv1d layers, residual blocks, LSTM, downsampling by [8, 5, 4, 2] = 320
+- **Output**: 128-dimensional embeddings at ~75 fps (24kHz) or ~150 fps (48kHz)
+- **Export format**: `torch.jit.trace` (.pt) - fixed 10-second input length
+- **Reference**: Défossez et al., "High Fidelity Neural Audio Compression" (2022)
+
+### CLAP Model
+
+- **Input**: 48kHz mono audio
+- **Preprocessing**: Log-mel spectrogram (64 mel bands)
+  - Uses librosa for STFT and mel filterbank
+  - Window: 1024, Hop: 480, Mel range: 50-14000 Hz
+  - Int16 quantization applied to match training
+- **Architecture**: CNN14 backbone (same as PANN) + projection layer (2048→512) + L2 normalization
+- **Output**: 512-dimensional L2-normalized embedding per audio file
+- **Export format**: `torch.export` (.pt2)
+- **Reference**: Elizalde et al., "CLAP: Learning Audio Concepts from Natural Language Supervision" (2022)
 
 ### FAD Computation
 
@@ -253,17 +402,25 @@ frechet-audio-distance-exported/
 │   └── models/
 │       ├── __init__.py
 │       ├── vggish.py                 # VGGishCore + preprocessing
-│       └── pann.py                   # PANNCore + preprocessing (librosa-based)
+│       ├── pann.py                   # PANNCore + preprocessing (librosa-based)
+│       ├── encodec.py                # Encodec preprocessing (no model class)
+│       └── clap.py                   # CLAPCore (PANNCore + projection)
 │
-├── scripts/                          # Dev scripts (require frechet_audio_distance)
+├── scripts/                          # Dev scripts (require original packages)
 │   ├── export_vggish.py              # Creates vggish_exported.pt2
 │   ├── export_pann.py                # Creates pann_cnn14_*_exported.pt2
+│   ├── export_encodec.py             # Creates encodec_*_exported.pt (requires encodec)
+│   ├── export_clap.py                # Creates clap_exported.pt2 (requires laion_clap)
 │   ├── verify_export.py              # Verifies VGGish equivalence
-│   └── verify_pann.py                # Verifies PANN equivalence
+│   ├── verify_pann.py                # Verifies PANN equivalence
+│   ├── verify_encodec.py             # Verifies Encodec equivalence
+│   └── verify_clap.py                # Verifies CLAP equivalence
 │
-└── tests/                            # Tests (do NOT require frechet_audio_distance)
+└── tests/                            # Tests (do NOT require original packages)
     ├── test_basic.py                 # VGGish functionality tests
-    └── test_pann.py                  # PANN functionality tests
+    ├── test_pann.py                  # PANN functionality tests
+    ├── test_encodec.py               # Encodec functionality tests
+    └── test_clap.py                  # CLAP functionality tests
 ```
 
 ## License
@@ -276,3 +433,5 @@ MIT License (same as original frechet-audio-distance)
 - VGGish model from [torchvggish](https://github.com/harritaylor/torchvggish) by harritaylor
 - Based on [VGGish](https://github.com/tensorflow/models/tree/master/research/audioset/vggish) from Google/AudioSet
 - PANN models from [PANNs](https://github.com/qiuqiangkong/audioset_tagging_cnn) by Kong et al.
+- Encodec model from [encodec](https://github.com/facebookresearch/encodec) by Meta Research
+- CLAP model from [laion_clap](https://github.com/LAION-AI/CLAP) by LAION-AI

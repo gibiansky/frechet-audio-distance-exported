@@ -47,6 +47,15 @@ PANN_CONFIGS = {
         "fmin": 50,
         "fmax": 14000,
     },
+    # 48kHz config used by CLAP (same architecture, different mel params)
+    48000: {
+        "sample_rate": 48000,
+        "window_size": 1024,
+        "hop_size": 480,
+        "mel_bins": 64,
+        "fmin": 50,
+        "fmax": 14000,
+    },
 }
 
 EMBEDDING_SIZE = 2048

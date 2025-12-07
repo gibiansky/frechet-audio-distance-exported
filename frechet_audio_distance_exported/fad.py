@@ -20,6 +20,22 @@ from tqdm import tqdm
 
 from .models.vggish import waveform_to_examples, SAMPLE_RATE as VGGISH_SAMPLE_RATE
 from .models.pann import waveform_to_logmel, PANN_CONFIGS, EMBEDDING_SIZE as PANN_EMBEDDING_SIZE
+from .models.encodec import (
+    preprocess_for_encodec,
+    pad_to_fixed_length as pad_to_fixed_encodec_length,
+    ENCODEC_CONFIGS,
+    EMBEDDING_SIZE as ENCODEC_EMBEDDING_SIZE,
+)
+from .models.clap import (
+    preprocess_for_clap,
+    pad_audio_to_max_length as pad_audio_for_clap,
+    CLAP_SAMPLE_RATE,
+    CLAP_EMBEDDING_SIZE,
+    MAX_AUDIO_SECONDS as CLAP_MAX_SECONDS,
+)
+
+# CLAP model expects exactly 1001 time frames (10 seconds at 48kHz with hop=480)
+CLAP_TIME_FRAMES = 1001
 
 
 def _pad_to_valid_pann_time(x: torch.Tensor) -> torch.Tensor:
@@ -50,6 +66,31 @@ def _pad_to_valid_pann_time(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
+def _pad_to_clap_time(x: torch.Tensor) -> torch.Tensor:
+    """Pad input to the fixed CLAP time dimension (1001 frames).
+
+    The exported CLAP model (HTSAT-tiny) expects exactly 1001 time frames,
+    which corresponds to 10 seconds of audio at 48kHz with hop_size=480.
+
+    Args:
+        x: Input tensor of shape [batch, 1, time, 64]
+
+    Returns:
+        Padded/truncated tensor with time dimension = 1001
+    """
+    time = x.shape[2]
+
+    if time < CLAP_TIME_FRAMES:
+        # Pad with zeros on the time dimension
+        pad_amount = CLAP_TIME_FRAMES - time
+        x = torch.nn.functional.pad(x, (0, 0, 0, pad_amount))
+    elif time > CLAP_TIME_FRAMES:
+        # Truncate to max length (shouldn't happen if audio is <= 10s)
+        x = x[:, :, :CLAP_TIME_FRAMES, :]
+
+    return x
+
+
 # URLs for downloading exported models
 EXPORTED_MODEL_URLS = {
     "vggish": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.1/vggish_exported.pt2",
@@ -57,6 +98,11 @@ EXPORTED_MODEL_URLS = {
     "pann-8k": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.2/pann_cnn14_8k_exported.pt2",
     "pann-16k": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.2/pann_cnn14_16k_exported.pt2",
     "pann-32k": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.2/pann_cnn14_32k_exported.pt2",
+    # Encodec models for different sample rates (JIT traced, .pt format)
+    "encodec-24k": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.3/encodec_24k_exported.pt",
+    "encodec-48k": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.3/encodec_48k_exported.pt",
+    # CLAP model (HTSAT-tiny 630k-audioset variant)
+    "clap": "https://github.com/gibiansky/frechet-audio-distance-exported/releases/download/v0.3/clap_exported.pt2",
 }
 
 # Valid model names and their configurations
@@ -65,6 +111,9 @@ VALID_MODELS = {
     "pann-8k": {"sample_rate": 8000, "embedding_dim": 2048},
     "pann-16k": {"sample_rate": 16000, "embedding_dim": 2048},
     "pann-32k": {"sample_rate": 32000, "embedding_dim": 2048},
+    "encodec-24k": {"sample_rate": 24000, "embedding_dim": 128, "channels": 1},
+    "encodec-48k": {"sample_rate": 48000, "embedding_dim": 128, "channels": 2},
+    "clap": {"sample_rate": 48000, "embedding_dim": 512},
 }
 
 # Map PANN model names to their sample rates
@@ -72,6 +121,12 @@ PANN_SAMPLE_RATES = {
     "pann-8k": 8000,
     "pann-16k": 16000,
     "pann-32k": 32000,
+}
+
+# Map Encodec model names to their sample rates
+ENCODEC_SAMPLE_RATES = {
+    "encodec-24k": 24000,
+    "encodec-48k": 48000,
 }
 
 
@@ -196,12 +251,23 @@ class FrechetAudioDistance:
         # Map model name to exported file name
         if self.model_name == "vggish":
             model_filename = "vggish_exported.pt2"
+            is_jit = False
         elif self.model_name in PANN_SAMPLE_RATES:
             # e.g., "pann-16k" -> "pann_cnn14_16k_exported.pt2"
             sr_suffix = self.model_name.split("-")[1]  # "16k"
             model_filename = f"pann_cnn14_{sr_suffix}_exported.pt2"
+            is_jit = False
+        elif self.model_name in ENCODEC_SAMPLE_RATES:
+            # e.g., "encodec-24k" -> "encodec_24k_exported.pt"
+            sr_suffix = self.model_name.split("-")[1]  # "24k"
+            model_filename = f"encodec_{sr_suffix}_exported.pt"
+            is_jit = True  # Encodec uses JIT traced models
+        elif self.model_name == "clap":
+            model_filename = "clap_exported.pt2"
+            is_jit = False
         else:
             model_filename = f"{self.model_name}_exported.pt2"
+            is_jit = False
 
         model_path = os.path.join(self.ckpt_dir, model_filename)
 
@@ -222,11 +288,16 @@ class FrechetAudioDistance:
         if self.verbose:
             print(f"[Exported FAD] Loading model from {model_path}...")
 
-        # Load exported model
-        exported = torch.export.load(model_path)
-        self.model = exported.module()
-        self.model.to(self.device)
-        # Note: eval() is not needed/supported for exported models
+        # Load model (JIT for Encodec, torch.export for others)
+        if is_jit:
+            self.model = torch.jit.load(model_path)
+            self.model.to(self.device)
+            self.model.eval()
+        else:
+            exported = torch.export.load(model_path)
+            self.model = exported.module()
+            self.model.to(self.device)
+            # Note: eval() is not needed/supported for exported models
 
     def get_embeddings(self, x: List[np.ndarray], sr: int) -> np.ndarray:
         """Get embeddings for a list of audio arrays.
@@ -240,10 +311,65 @@ class FrechetAudioDistance:
         """
         embd_lst = []
         is_pann = self.model_name.startswith("pann-")
+        is_encodec = self.model_name.startswith("encodec-")
+        is_clap = self.model_name == "clap"
 
         for audio in tqdm(x, disable=(not self.verbose)):
             try:
-                if is_pann:
+                if is_encodec:
+                    # Encodec preprocessing: resample, channel conversion, pad to fixed length
+                    target_sr = ENCODEC_SAMPLE_RATES[self.model_name]
+                    target_channels = VALID_MODELS[self.model_name].get("channels", 1)
+
+                    # Store original length for output trimming
+                    if sr != target_sr:
+                        original_samples = int(len(audio) * target_sr / sr)
+                    else:
+                        original_samples = len(audio)
+
+                    preprocessed = preprocess_for_encodec(
+                        audio, sr, target_sample_rate=target_sr, target_channels=target_channels
+                    )
+                    # Pad to fixed length required by traced model
+                    preprocessed = pad_to_fixed_encodec_length(preprocessed, target_sr)
+                    preprocessed = preprocessed.to(self.device)
+
+                    # Run model
+                    with torch.no_grad():
+                        embd = self.model(preprocessed)  # [1, 128, max_time]
+
+                    # Trim output to actual audio length
+                    hop_length = ENCODEC_CONFIGS[target_sr]["hop_length"]
+                    actual_frames = original_samples // hop_length
+                    embd = embd[:, :, :actual_frames]
+
+                    # Transpose to [time, 128] to match original FAD behavior
+                    # Each time frame is a 128-dim embedding
+                    embd = embd.squeeze(0).transpose(0, 1)  # [time, 128]
+                    embd = embd.cpu().numpy()
+
+                elif is_clap:
+                    # CLAP preprocessing: waveform -> 48kHz log-mel spectrogram
+                    # The exported HTSAT model expects exactly 1001 time frames
+                    # Important: pad waveform BEFORE preprocessing (not mel-spectrogram after)
+                    # because mel-spectrogram of zeros != zeros in mel-spectrogram (log scale)
+                    max_samples = CLAP_MAX_SECONDS * CLAP_SAMPLE_RATE  # 480000
+                    audio_padded = audio
+                    if len(audio_padded) < max_samples:
+                        audio_padded = np.pad(audio_padded, (0, max_samples - len(audio_padded)))
+                    preprocessed = preprocess_for_clap(audio_padded, sr, return_tensor=True)
+                    # Safety: pad to fixed CLAP time dimension (1001 frames = 10 seconds)
+                    preprocessed = _pad_to_clap_time(preprocessed)
+                    preprocessed = preprocessed.to(self.device)
+
+                    # Run model
+                    with torch.no_grad():
+                        embd = self.model(preprocessed)
+
+                    # CLAP returns one 512-dim L2-normalized embedding per audio file
+                    embd = embd.cpu().numpy()
+
+                elif is_pann:
                     # PANN preprocessing: waveform -> log-mel spectrogram
                     target_sr = PANN_SAMPLE_RATES[self.model_name]
                     preprocessed = waveform_to_logmel(audio, sr, target_sample_rate=target_sr, return_tensor=True)
@@ -291,8 +417,52 @@ class FrechetAudioDistance:
             Embeddings as numpy array
         """
         is_pann = self.model_name.startswith("pann-")
+        is_encodec = self.model_name.startswith("encodec-")
+        is_clap = self.model_name == "clap"
 
-        if is_pann:
+        if is_encodec:
+            target_sr = ENCODEC_SAMPLE_RATES[self.model_name]
+            target_channels = VALID_MODELS[self.model_name].get("channels", 1)
+
+            # Store original length for output trimming
+            if self.sample_rate != target_sr:
+                original_samples = int(len(audio) * target_sr / self.sample_rate)
+            else:
+                original_samples = len(audio)
+
+            preprocessed = preprocess_for_encodec(
+                audio, self.sample_rate, target_sample_rate=target_sr, target_channels=target_channels
+            )
+            preprocessed = pad_to_fixed_encodec_length(preprocessed, target_sr)
+            preprocessed = preprocessed.to(self.device)
+
+            with torch.no_grad():
+                embd = self.model(preprocessed)
+
+            # Trim output to actual audio length
+            hop_length = ENCODEC_CONFIGS[target_sr]["hop_length"]
+            actual_frames = original_samples // hop_length
+            embd = embd[:, :, :actual_frames]
+
+            # Transpose to [time, 128]
+            embd = embd.squeeze(0).transpose(0, 1)
+            return embd.cpu().numpy()
+
+        elif is_clap:
+            # Important: pad waveform BEFORE preprocessing (not mel-spectrogram after)
+            max_samples = CLAP_MAX_SECONDS * CLAP_SAMPLE_RATE  # 480000
+            audio_padded = audio
+            if len(audio_padded) < max_samples:
+                audio_padded = np.pad(audio_padded, (0, max_samples - len(audio_padded)))
+            preprocessed = preprocess_for_clap(audio_padded, self.sample_rate, return_tensor=True)
+            # Safety: pad to fixed CLAP time dimension (1001 frames = 10 seconds)
+            preprocessed = _pad_to_clap_time(preprocessed)
+            preprocessed = preprocessed.to(self.device)
+
+            with torch.no_grad():
+                embd = self.model(preprocessed)
+
+        elif is_pann:
             target_sr = PANN_SAMPLE_RATES[self.model_name]
             preprocessed = waveform_to_logmel(audio, self.sample_rate, target_sample_rate=target_sr, return_tensor=True)
             # Pad to valid time dimension for exported model
