@@ -26,4 +26,5 @@ env/
 htmlcov/
 
 # Exported models (too large for git)
+*.pt
 *.pt2
