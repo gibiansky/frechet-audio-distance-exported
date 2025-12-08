@@ -69,6 +69,66 @@ from torch.export import export, Dim
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
+class DeviceAwareLSTM(nn.Module):
+    """LSTM wrapper that creates hidden states on the same device as input.
+
+    This fixes an issue where JIT-traced LSTMs have hidden states hardcoded
+    to CPU during tracing. When the traced model is later moved to GPU,
+    the model parameters are moved but the LSTM hidden state initialization
+    still creates tensors on CPU, causing:
+        RuntimeError: Input and hidden tensors are not at the same device
+
+    By using input.new_zeros() to create hidden states, the traced model
+    properly creates hidden states on whatever device the input is on,
+    allowing the model to work on CPU, CUDA, or MPS.
+    """
+
+    def __init__(self, lstm: nn.LSTM):
+        super().__init__()
+        self.input_size = lstm.input_size
+        self.hidden_size = lstm.hidden_size
+        self.num_layers = lstm.num_layers
+        self.batch_first = lstm.batch_first
+        self.bidirectional = lstm.bidirectional
+        self.lstm = lstm
+
+    def forward(self, input):
+        # Determine batch size based on input shape
+        if self.batch_first:
+            batch_size = input.size(0)
+        else:
+            batch_size = input.size(1)
+
+        # Use input.new_zeros() to create hidden states on same device as input
+        # This is traced correctly and will work on any device after loading
+        num_directions = 2 if self.bidirectional else 1
+        h0 = input.new_zeros(
+            self.num_layers * num_directions,
+            batch_size,
+            self.hidden_size,
+        )
+        c0 = input.new_zeros(
+            self.num_layers * num_directions,
+            batch_size,
+            self.hidden_size,
+        )
+
+        output, hidden = self.lstm(input, (h0, c0))
+        return output, hidden
+
+
+def replace_lstm_with_device_aware(module):
+    """Recursively replace nn.LSTM with DeviceAwareLSTM in a module.
+
+    This is necessary to fix the GPU compatibility issue in traced models.
+    """
+    for name, child in module.named_children():
+        if isinstance(child, nn.LSTM):
+            setattr(module, name, DeviceAwareLSTM(child))
+        else:
+            replace_lstm_with_device_aware(child)
+
+
 # Maximum audio length for traced model (10 seconds)
 # All inputs must be padded to this length before passing to the traced model.
 # The output can then be trimmed based on the original input length.
@@ -258,6 +318,11 @@ def export_encodec(sample_rate: int, output_dir: Path):
     # Extract encoder
     encoder = model.encoder
     encoder.eval()
+
+    # Replace nn.LSTM with DeviceAwareLSTM to fix GPU compatibility
+    # This ensures LSTM hidden states are created on the same device as input
+    print("Applying LSTM device-aware wrapper for GPU compatibility...")
+    replace_lstm_with_device_aware(encoder)
 
     # Validate encoder
     if not validate_encoder(encoder, sample_rate):
